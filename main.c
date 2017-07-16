@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <pcap/pcap.h>
+#include <arpa/inet.h>
 #include <netinet/ip.h>
 #include <netinet/tcp.h>
 #include <netinet/udp.h>
@@ -12,19 +13,19 @@
 #define IP_DF 0x4000		/* dont fragment flag */
 #define IP_MF 0x2000		/* more fragments flag */
 #define IP_OFFMASK 0x1fff	/* mask for fragmenting bits */
-#define IP_HL(ip)		(((ip)->ip_vhl) & 0x0f)
-#define IP_V(ip)		(((ip)->ip_vhl) >> 4)
+#define SIZE_ETHERNET 14
 
+#define SWAP(s) (((((s) & 0xff) << 8) | (((s) >> 8) & 0xff)))
 
-void packet_info(unsigned char *user, const struct pcap_pkhdr *, const unsigned char *packet);
+void packet_info(unsigned char *, const struct pcap_pkthdr *, const unsigned char *);
 
-struct pcap_pkthdr {
-
-	struct timeval ts; 	/* time stamp? */
-	bpf_u_int32 caplen; 	/* length of portion present */
-	bpf_u_int32 len; 	/* length this packet (off wire) */
-
-};
+//struct pcap_pkthdr {
+//
+//	struct timeval ts; 	/* time stamp? */
+//	bpf_u_int32 caplen; 	/* length of portion present */
+//	bpf_u_int32 len; 	/* length this packet (off wire) */
+//
+//};
 
 struct eth_header {
 
@@ -32,36 +33,69 @@ struct eth_header {
 	unsigned char eth_shost[ETHER_ADDR_LEN]; /* Source host address */
 	unsigned short eth_type;		 /* IP? ARP? RARP? etc */
 		
-}
+};
 
 /* IP header */
-struct sniff_ip {
-	unsigned char ip_vhl;		/* version << 4 | header length >> 2 */
+struct ip_header {
+	unsigned char ip_verhlen;	/* version << 4 | header length >> 2 */
 	unsigned char ip_tos;		/* type of service */
 	unsigned short ip_len;		/* total length */
-	unsigned hort ip_id;		/* identification */
+	unsigned short ip_id;		/* identification */
 	unsigned short ip_off;		/* fragment offset field */
 	unsigned char ip_ttl;		/* time to live */
-	u_char ip_p;		/* protocol */
-	u_short ip_sum;		/* checksum */
+	unsigned char ip_protocol;	/* protocol */
+	unsigned short ip_chsum;	/* checksum */
 
 	struct in_addr ip_src,ip_dst; /* source and dest address */
 };
 
+#define IP_HL(ip)		(((ip)->ip_verhlen) & 0x0f)
+#define IP_V(ip)		(((ip)->ip_verhlen) >> 4)
+
+
+/* TCP header */
+
+
+struct tcp_header {
+	unsigned short tcp_srcport;	/* source port */
+	unsigned short tcp_dstport;	/* destination port */
+	unsigned int tcp_seq;		/* sequence number */
+	unsigned int tcp_ack;		/* acknowledgement number */
+	unsigned char tcp_offx2;	/* data offset, rsvd */
+#define TH_OFF(th)	(((th)->tcp_offx2 & 0xf0) >> 4)
+	unsigned char tcp_flags;
+#define TH_FIN 0x01
+#define TH_SYN 0x02
+#define TH_RST 0x04
+#define TH_PUSH 0x08
+#define TH_ACK 0x10
+#define TH_URG 0x20
+#define TH_ECE 0x40
+#define TH_CWR 0x80
+#define TH_FLAGS (TH_FIN|TH_SYN|TH_RST|TH_ACK|TH_URG|TH_ECE|TH_CWR)
+	unsigned short tcp_widsiz;		/* window */
+	unsigned short tcp_chsum;		/* checksum */
+	unsigned short tcp_urgp;		/* urgent pointer */
+};
+
+
 int main() {
 
 	char *dev;
+	pcap_t *handle;
 //	char *net;
 //	char *mask;
 	char filter_exp[] = "port 80";		/* filter port num is 80 */
+	char errbuf[PCAP_ERRBUF_SIZE];
 
-	buf_u_int32 net;
+	bpf_u_int32 net;
 	bpf_u_int32 mask;
 	bpf_u_int32 snaplen;			/* Length of pkt */
 
-	struct pcap_pkhdr h;
+	struct pcap_pkthdr h;
+	struct bpf_program fp;
 
-	int num_packets 20;
+	int num_packets = 20;
 
 	/* Define the device */
 	dev = pcap_lookupdev(errbuf);
@@ -84,8 +118,8 @@ int main() {
 		fprintf(stderr, "Couldn't open device %s: %s\n", dev, errbuf);
 		return (2);
 	}
-	printf("%s\n",dev);
-									
+	printf("live\n");
+								
 	if(pcap_datalink(handle) != DLT_EN10MB) {
 		fprintf(stderr, "Device %s doesn't provide Ethernet headers - not supported\n", dev);
 		return (2);
@@ -106,14 +140,63 @@ int main() {
 	printf("Printed filter %s\n", filter_exp);
 
 	/* Check actual packet using pcap header */
-	h
 
 	/* Get packets */
-	pcap_loop(handle, num_packets, get_packets, NULL);
+	pcap_loop(handle, num_packets, packet_info, 0);
 	/* Print its length */
 	printf("Jacked a packet with length of [%d]\n", h.len);
 	/* And close the session */
 	pcap_close(handle);	
 
+}
+void packet_info(unsigned char *user, const struct pcap_pkthdr *h, const unsigned char *packet) {
+
+	int i;
+	int len = h->len;
+	
+	const struct eth_header *eth;
+	const struct ip_header *ip;
+	const struct tcp_header *tcp;
+	const char *data;
+
+	unsigned int SIZE_IP;
+	unsigned int SIZE_TCP;
+
+	eth = (struct eth_header*)(packet);
+
+	/* print dst mac addr */
+	printf("Destination Mac Address is ");
+	for (i=0; i<6; i++) {
+		printf("%02x ", eth->eth_dhost[i]);
+	}
+	printf("\n");
+
+	/* print src mac addr */
+	printf("Source Mac Address is ");
+	for (i=0; i<6; i++) {
+		printf("%02x ", eth->eth_shost[i]);
+	}
+	printf("\n");
+
+	ip = (struct ip_header*)(packet + SIZE_ETHERNET);
+
+	printf("Destination IP Address is %s\n", inet_ntoa(ip->ip_dst));
+	printf("Source IP Address is %s\n", inet_ntoa(ip->ip_src));
+	printf("IP protocol is %s\n", inet_ntoa(ip->ip_dst));
+	
+	SIZE_IP = IP_HL(ip) * 4;
+
+	tcp = (struct tcp_header*)(packet + SIZE_ETHERNET+SIZE_IP);
+	printf("Destination TCP port : %d\n", SWAP(tcp->tcp_dstport));
+	printf("Source TCP port : %d\n", SWAP(tcp->tcp_srcport));
+
+
+	SIZE_TCP = TH_OFF(tcp) * 4;
+
+	data = (unsigned char*)(packet + SIZE_ETHERNET + SIZE_IP + SIZE_TCP);
+	printf("Data : %s\n", data);
+	printf("\n\n");
+	
+	return;
 
 }
